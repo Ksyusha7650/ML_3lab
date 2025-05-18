@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+import sacrebleu
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -94,7 +95,7 @@ def train(model, dataloader, epochs=3):
         #print(f'Epoch: {epoch+1}, Loss: {loss.item():.4f}')
 
 # Генерация текста
-def generate(model, start_str, length=200, temperature=0.5):
+def generate(model, start_str, length=200, temperature=0.4):
     model.eval()
     chars = [ch for ch in start_str.lower()]
     hidden = model.init_hidden(1)
@@ -113,6 +114,71 @@ def generate(model, start_str, length=200, temperature=0.5):
     
     return ''.join(chars)
 
+# --- Perplexity ---
+def calculate_perplexity(model, dataloader, criterion):
+    model.eval()
+    total_loss = 0
+    total_count = 0
+    with torch.no_grad():
+        for x, y in dataloader:
+            x, y = x.to(device), y.to(device)
+            hidden = model.init_hidden(x.size(0))
+            output, _ = model(x, hidden)
+            loss = criterion(output, y.reshape(-1))
+            total_loss += loss.item() * x.size(0)
+            total_count += x.size(0)
+    return torch.exp(torch.tensor(total_loss / total_count)).item()
+
+
+# --- chrF++ ---
+def calculate_chrf(generated_texts, reference_texts):
+    return sacrebleu.corpus_chrf(generated_texts, [reference_texts]).score
+
+
+# --- Distinct-n ---
+def distinct_n(texts, n=2):
+    ngrams = set()
+    total = 0
+    for text in texts:
+        tokens = list(text)
+        for i in range(len(tokens) - n + 1):
+            ngrams.add(tuple(tokens[i:i+n]))
+            total += 1
+    return len(ngrams) / total if total > 0 else 0
+
+
+# --- Novelty ---
+def calculate_novelty(generated, training_text, n=5):
+    training_ngrams = set(tuple(training_text[i:i+n]) for i in range(len(training_text) - n))
+    gen_ngrams = [tuple(generated[i:i+n]) for i in range(len(generated) - n)]
+    novel = [ng for ng in gen_ngrams if ng not in training_ngrams]
+    return len(novel) / len(gen_ngrams) if gen_ngrams else 0
+
+
 # Пример генерации
 train(model, dataloader)
-print(generate(model, "люблю тебя", length=300))
+# Генерация и оценка
+
+generated = [generate(model, "люблю тебя", length=300)]
+reference = ['\n'.join(['\n'.join(lines) for lines in poems.values()])[:300]]
+
+print("\n--- Оценка генерации ---")
+print("Сгенерировано:\n", generated[0])
+print(f"\nchrF++: {calculate_chrf(generated, reference):.2f}")
+print(f"Perplexity: {calculate_perplexity(model, dataloader, criterion):.2f}")
+print(f"Distinct-1: {distinct_n(generated, n=1):.4f}")
+print(f"Distinct-2: {distinct_n(generated, n=2):.4f}")
+print(f"Novelty: {calculate_novelty(generated[0], text)* 100:.2f}%")
+
+
+prompts = [
+            "луна светит",
+            "любовь это",
+            "осень наступила",
+            "я помню чудное мгновенье",
+            "в лесу родилась ёлочка"
+        ]
+        
+for prompt in prompts:
+    print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    print(generate(model, prompt, length=300))
